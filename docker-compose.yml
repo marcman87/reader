@@ -1,0 +1,10 @@
+services:
+  reader:
+    build: .
+    container_name: reader
+    ports:
+      - "8320:8320"
+    env_file: .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

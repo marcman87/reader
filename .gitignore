@@ -1,0 +1,11 @@
+# secrets — never commit
+.env
+
+# runtime data (SQLite directory, imported dumps)
+data/
+
+# build artifacts
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc

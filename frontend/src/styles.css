@@ -1,0 +1,198 @@
+:root {
+  --bg0: #101214;
+  --bg1: #16191d;
+  --bg2: #1d2127;
+  --bg3: #262b33;
+  --line: #2b313a;
+  --ink: #e8e6e1;
+  --muted: #8b929c;
+  --dim: #5c636d;
+  --steel: #7da7c4;        /* interactive */
+  --steel-dim: #4f6b80;
+  --reddit: #d98a5f;       /* network hue: Reddit */
+  --chan: #86a06a;         /* network hue: 4chan  */
+  --nsfw: #c25a5a;
+  --ok: #6fae7c;
+  --radius: 6px;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg0); }
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg0);
+}
+a { color: var(--steel); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--steel); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* ---------- shell ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 20px; height: 52px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  font-family: var(--mono); font-weight: 500; letter-spacing: 0.18em;
+  font-size: 14px; color: var(--ink);
+}
+.brand:hover { text-decoration: none; color: var(--steel); }
+.topnav { display: flex; gap: 4px; }
+.topnav a {
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  padding: 5px 10px; border-radius: var(--radius);
+}
+.topnav a.active { color: var(--ink); background: var(--bg3); }
+.topnav a:hover { text-decoration: none; color: var(--ink); }
+.spacer { flex: 1; }
+
+.page { max-width: 900px; margin: 0 auto; padding: 20px 16px 80px; }
+.page-wide { max-width: 1200px; }
+
+/* ---------- segmented control (signature: NSFW tri-state) ---------- */
+.seg {
+  display: inline-flex; background: var(--bg0);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 2px;
+}
+.seg button {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.05em;
+  color: var(--muted); background: none; border: 0;
+  padding: 4px 10px; border-radius: 4px; cursor: pointer;
+}
+.seg button:hover { color: var(--ink); }
+.seg button.on { color: var(--ink); background: var(--bg3); }
+.seg.nsfw button.on[data-v="nsfw"] { color: #fff; background: var(--nsfw); }
+.seg.nsfw button.on[data-v="all"]  { color: var(--bg0); background: var(--steel); }
+.seg.nsfw button.on[data-v="sfw"]  { color: var(--bg0); background: var(--ok); }
+
+/* ---------- controls ---------- */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+.controls .grow { flex: 1; }
+select, input[type="text"], input[type="search"] {
+  font-family: var(--mono); font-size: 13px; color: var(--ink);
+  background: var(--bg1); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 7px 10px;
+}
+input[type="text"], input[type="search"] { width: 100%; }
+.btn {
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+  background: var(--bg2); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 7px 14px; cursor: pointer;
+}
+.btn:hover { background: var(--bg3); border-color: var(--steel-dim); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn.primary { background: var(--steel-dim); border-color: var(--steel-dim); }
+.btn.primary:hover { background: var(--steel); color: var(--bg0); }
+
+/* ---------- cards & lists ---------- */
+.card {
+  background: var(--bg1); border: 1px solid var(--line);
+  border-left: 3px solid var(--dim);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px;
+}
+.card.src-reddit { border-left-color: var(--reddit); }
+.card.src-chan   { border-left-color: var(--chan); }
+
+.meta { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.meta a { color: var(--muted); }
+.meta a:hover { color: var(--steel); }
+.meta .sep { margin: 0 6px; color: var(--dim); }
+.tag {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line);
+  color: var(--muted); margin-left: 8px; vertical-align: 1px;
+}
+.tag.nsfw { color: #fff; background: var(--nsfw); border-color: var(--nsfw); }
+.tag.flair { color: var(--steel); }
+
+.post-title { font-size: 16.5px; font-weight: 600; margin: 3px 0 4px; line-height: 1.35; }
+.post-title a { color: var(--ink); }
+.post-row { display: flex; gap: 12px; }
+.post-body { flex: 1; min-width: 0; }
+.thumb {
+  width: 84px; height: 64px; object-fit: cover; flex: none;
+  border-radius: 4px; background: var(--bg2); border: 1px solid var(--line);
+}
+
+.dirlist .card { display: flex; gap: 12px; align-items: baseline; padding: 9px 14px; }
+.dirlist .name { font-family: var(--mono); font-size: 13.5px; min-width: 220px; font-weight: 500; }
+.dirlist .subs { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-width: 90px; text-align: right; }
+.dirlist .desc { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+.stats { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 8px 0; }
+.stats b { color: var(--ink); font-weight: 500; }
+
+/* ---------- content rendering ---------- */
+.md { font-size: 14.5px; overflow-wrap: anywhere; }
+.md p { margin: 8px 0; }
+.md pre { background: var(--bg0); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; overflow-x: auto; font-size: 13px; }
+.md code { font-family: var(--mono); font-size: 13px; background: var(--bg0); padding: 1px 4px; border-radius: 3px; }
+.md blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
+.md img { max-width: 100%; border-radius: var(--radius); }
+.md table { border-collapse: collapse; }
+.md td, .md th { border: 1px solid var(--line); padding: 4px 8px; }
+
+.chan-com { font-size: 14px; overflow-wrap: anywhere; }
+.chan-com .quote { color: var(--chan); }
+.chan-com a.quotelink { color: var(--reddit); font-family: var(--mono); font-size: 13px; }
+
+/* ---------- media ---------- */
+.media-wrap { margin-top: 10px; }
+.media-wrap img, .media-wrap video {
+  max-width: 100%; max-height: 78vh; border-radius: var(--radius);
+  background: #000; display: block;
+}
+.gallery-nav { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.gallery-nav .idx { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* ---------- comments ---------- */
+.comment { margin-top: 10px; padding-left: 12px; border-left: 2px solid var(--line); }
+.comment .comment { margin-left: 4px; }
+.comment.collapsed > .md, .comment.collapsed > .comment { display: none; }
+.c-toggle {
+  background: none; border: 0; cursor: pointer; color: var(--dim);
+  font-family: var(--mono); font-size: 12px; padding: 0 6px 0 0;
+}
+.c-toggle:hover { color: var(--steel); }
+.op-badge { color: var(--steel); font-weight: 600; }
+.mod-badge { color: var(--ok); font-weight: 600; }
+
+/* ---------- 4chan catalog grid ---------- */
+.catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.catalog .card { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.catalog img.cat-thumb { width: 100%; height: 130px; object-fit: cover; border-radius: 4px; background: var(--bg2); }
+.catalog .sub { font-weight: 600; font-size: 13.5px; }
+.catalog .excerpt { color: var(--muted); font-size: 12.5px; max-height: 72px; overflow: hidden; }
+
+.chan-post { display: block; }
+.chan-post .chan-media { float: left; margin: 6px 14px 8px 0; max-width: 46%; }
+.chan-post .chan-media img, .chan-post .chan-media video { max-width: 100%; border-radius: 4px; }
+.chan-post::after { content: ""; display: block; clear: both; }
+
+.load-more { display: block; margin: 18px auto; }
+.empty { color: var(--muted); font-family: var(--mono); font-size: 13px; padding: 30px 0; text-align: center; }
+.error-box {
+  background: #2a1c1c; border: 1px solid var(--nsfw); border-radius: var(--radius);
+  color: #e0b4b4; font-family: var(--mono); font-size: 12.5px; padding: 10px 14px; margin: 14px 0;
+  overflow-wrap: anywhere;
+}
+h2.section { font-size: 13px; font-family: var(--mono); font-weight: 500; letter-spacing: 0.12em; color: var(--muted); text-transform: uppercase; margin: 26px 0 10px; }
+
+@media (max-width: 640px) {
+  .topbar { gap: 8px; padding: 0 10px; overflow-x: auto; }
+  .dirlist .name { min-width: 140px; }
+  .dirlist .desc { display: none; }
+  .chan-post .chan-media { float: none; max-width: 100%; margin-right: 0; }
+}
