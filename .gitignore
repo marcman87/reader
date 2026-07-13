@@ -1,11 +1,41 @@
-# secrets — never commit
+# === Secrets — NEVER commit (the .env.example template IS tracked) ===
+# .env holds Reddit API credentials.
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
 
-# runtime data (SQLite directory, imported dumps)
+# === Databases & runtime data ===
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 data/
+backend/data/
 
-# build artifacts
+# === Machine-specific compose overrides ===
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# === Dependencies & build artifacts ===
+node_modules/
+dist/
+build/
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
+.venv/
+venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
