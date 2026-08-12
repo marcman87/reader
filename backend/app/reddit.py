@@ -1,263 +1,356 @@
-"""Reddit OAuth (script app, password grant) client.
+"""Reddit public Atom feed (.rss) client — no API credentials.
 
-All requests go to oauth.reddit.com with a bearer token. Tokens last ~1h and
-are re-requested on expiry. raw_json=1 everywhere to avoid HTML entities.
+Reddit declined the Data API application, so this reads the public Atom feeds
+on www.reddit.com instead. Feeds are unauthenticated and IP rate-limited
+(observed ~10 req/min with burst penalties), hence the global throttle and
+response cache. Feeds carry no scores, comment counts, per-post NSFW flags,
+or media metadata — those fields are None/best-effort:
+  - score / num_comments        -> None
+  - over_18                     -> subreddit-level lookup in the local directory
+  - selftext / comment bodies   -> reddit-rendered HTML (selftext_html / body_html)
+  - galleries                   -> plain links (items not enumerable via RSS)
+  - v.redd.it video             -> still works: DASH manifests need no auth
 """
 import asyncio
+import html
+import re
 import time
+from urllib.parse import quote
+from xml.etree import ElementTree as ET
 
 import httpx
 
 from . import config, db
 
-TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-API = "https://oauth.reddit.com"
+BASE = "https://www.reddit.com"
+NS = {"atom": "http://www.w3.org/2005/Atom", "media": "http://search.yahoo.com/mrss/"}
+
+THROTTLE = 15.0     # seconds between upstream requests (global)
+CACHE_TTL = 300.0   # seconds a fetched feed stays fresh
+COOLDOWN = 60.0     # seconds to back off after a 429
+
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+VIDEO_EXT = (".mp4", ".webm")
+
+_MD_BLOCK = re.compile(r"<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->", re.S)
+_LINK_ANCHOR = re.compile(r'<a href="([^"]+)">\s*\[link\]\s*</a>')
+_TAG = re.compile(r"<[^>]+>")
 
 
 class RedditError(Exception):
     pass
 
 
+def _prox(url: str | None) -> str | None:
+    return f"/api/proxy?url={quote(url, safe='')}" if url else None
+
+
+def _epoch(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return None
+
+
+def _strip_tags(s: str) -> str:
+    return html.unescape(_TAG.sub("", s)).strip()
+
+
 class RedditClient:
     def __init__(self):
-        self._token: str | None = None
-        self._token_exp: float = 0
-        self._lock = asyncio.Lock()
         self._http = httpx.AsyncClient(timeout=30, follow_redirects=True)
+        self._lock = asyncio.Lock()
+        self._last_req = 0.0
+        self._cooldown_until = 0.0
+        self._cache: dict[str, tuple[float, ET.Element]] = {}
+        # feed-level subreddit metadata harvested from listing fetches
+        self._about_cache: dict[str, dict] = {}
 
-    @property
-    def configured(self) -> bool:
-        return bool(config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET
-                    and config.REDDIT_USERNAME and config.REDDIT_PASSWORD)
+    async def _fetch(self, path: str, params: dict | None = None) -> ET.Element:
+        qs = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in (params or {}).items() if v is not None)
+        url = f"{BASE}{path}" + (f"?{qs}" if qs else "")
 
-    async def _ensure_token(self):
+        cached = self._cache.get(url)
+        if cached and time.monotonic() - cached[0] < CACHE_TTL:
+            return cached[1]
+
+        if time.monotonic() < self._cooldown_until:
+            if cached:  # stale beats nothing while rate-limited
+                return cached[1]
+            raise RedditError(
+                "Backing off after a Reddit rate limit (429) — retry in a minute."
+            )
+
         async with self._lock:
-            if self._token and time.time() < self._token_exp - 60:
-                return
-            if not self.configured:
-                raise RedditError(
-                    "Reddit credentials missing. Set REDDIT_CLIENT_ID/SECRET/USERNAME/PASSWORD in .env"
-                )
-            resp = await self._http.post(
-                TOKEN_URL,
-                auth=(config.REDDIT_CLIENT_ID, config.REDDIT_CLIENT_SECRET),
-                data={
-                    "grant_type": "password",
-                    "username": config.REDDIT_USERNAME,
-                    "password": config.REDDIT_PASSWORD,
-                },
-                headers={"User-Agent": config.USER_AGENT},
-            )
-            if resp.status_code != 200:
-                raise RedditError(f"OAuth token request failed ({resp.status_code}): {resp.text[:300]}")
-            data = resp.json()
-            if "access_token" not in data:
-                raise RedditError(f"OAuth response missing token: {data}")
-            self._token = data["access_token"]
-            self._token_exp = time.time() + int(data.get("expires_in", 3600))
+            wait = THROTTLE - (time.monotonic() - self._last_req)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_req = time.monotonic()
 
-    async def get(self, path: str, params: dict | None = None) -> dict:
-        await self._ensure_token()
-        params = dict(params or {})
-        params.setdefault("raw_json", 1)
-        resp = await self._http.get(
-            f"{API}{path}",
-            params=params,
-            headers={"Authorization": f"bearer {self._token}", "User-Agent": config.USER_AGENT},
-        )
-        if resp.status_code == 401:
-            self._token = None
-            await self._ensure_token()
-            resp = await self._http.get(
-                f"{API}{path}",
-                params=params,
-                headers={"Authorization": f"bearer {self._token}", "User-Agent": config.USER_AGENT},
-            )
+        resp = await self._http.get(url, headers={"User-Agent": config.USER_AGENT})
         if resp.status_code == 429:
-            raise RedditError("Reddit rate limit hit (429). Back off and retry.")
+            self._cooldown_until = time.monotonic() + COOLDOWN
+            if cached:
+                return cached[1]
+            raise RedditError(
+                "Reddit rate limit hit (429). RSS feeds are throttled per IP — wait a minute and retry."
+            )
         if resp.status_code >= 400:
-            raise RedditError(f"Reddit API {resp.status_code} on {path}: {resp.text[:300]}")
-        return resp.json()
+            raise RedditError(f"Reddit {resp.status_code} on {path}")
+        try:
+            root = ET.fromstring(resp.text)
+        except ET.ParseError as e:
+            raise RedditError(f"Bad feed XML from {path}: {e}") from e
 
-    # ---------- normalization ----------
+        # cap cache size; oldest entries are cheapest to lose
+        if len(self._cache) > 200:
+            for k in sorted(self._cache, key=lambda k: self._cache[k][0])[:50]:
+                del self._cache[k]
+        self._cache[url] = (time.monotonic(), root)
+        return root
+
+    # ---------- parsing ----------
 
     @staticmethod
-    def normalize_post(d: dict) -> dict:
-        """Flatten a t3 post into what the frontend needs, with media typed."""
-        from urllib.parse import quote
+    def _entry_text(entry: ET.Element, tag: str) -> str:
+        el = entry.find(f"atom:{tag}", NS)
+        return (el.text or "") if el is not None else ""
 
-        def prox(url):
-            return f"/api/proxy?url={quote(url, safe='')}" if url else None
+    def _parse_post(self, entry: ET.Element) -> dict:
+        raw_id = self._entry_text(entry, "id")             # t3_xxx
+        pid = raw_id.split("_", 1)[-1]
+        author_el = entry.find("atom:author/atom:name", NS)
+        author = (author_el.text or "").removeprefix("/u/") if author_el is not None else "[deleted]"
+        cat = entry.find("atom:category", NS)
+        subreddit = cat.get("term") if cat is not None else None
+        link = entry.find("atom:link", NS)
+        permalink_abs = link.get("href") if link is not None else ""
+        permalink = permalink_abs.replace(BASE, "") or None
+        if not subreddit and permalink:
+            pm = re.match(r"/r/([^/]+)/", permalink)
+            subreddit = pm.group(1) if pm else None
+        content = self._entry_text(entry, "content")
+        created = _epoch(self._entry_text(entry, "published") or self._entry_text(entry, "updated"))
 
-        media: dict = {"kind": "link"}
-        url = d.get("url_overridden_by_dest") or d.get("url") or ""
+        # self-post body (reddit-rendered HTML between SC_OFF/SC_ON markers)
+        m = _MD_BLOCK.search(content)
+        selftext_html = m.group(1).strip() if m else ""
 
-        if d.get("is_self"):
-            media = {"kind": "self"}
-        elif d.get("is_gallery") and d.get("media_metadata"):
-            items = []
-            order = [i.get("media_id") for i in (d.get("gallery_data") or {}).get("items", [])]
-            mm = d["media_metadata"]
-            for mid in order or list(mm.keys()):
-                m = mm.get(mid) or {}
-                s = m.get("s") or {}
-                u = s.get("u") or s.get("gif")
-                if u:
-                    items.append({"url": prox(u), "w": s.get("x"), "h": s.get("y")})
-            media = {"kind": "gallery", "items": items}
-        elif d.get("is_video") and (d.get("media") or {}).get("reddit_video"):
-            rv = d["media"]["reddit_video"]
-            vid = ""
-            fb = rv.get("fallback_url", "")
-            # https://v.redd.it/<id>/DASH_720.mp4?...
-            if "v.redd.it/" in fb:
-                vid = fb.split("v.redd.it/")[1].split("/")[0]
-            media = {
-                "kind": "video",
-                "video_id": vid,
-                "dash": f"/api/vreddit/{vid}/DASHPlaylist.mpd" if vid else None,
-                "fallback": prox(fb.split("?")[0]) if fb else None,
-                "duration": rv.get("duration"),
-                "w": rv.get("width"),
-                "h": rv.get("height"),
-                "is_gif": rv.get("is_gif", False),
-            }
-        elif d.get("post_hint") == "image" or url.split("?")[0].lower().endswith(
-            (".jpg", ".jpeg", ".png", ".gif", ".webp")
-        ):
-            media = {"kind": "image", "url": prox(url)}
-        elif url.split("?")[0].lower().endswith((".mp4", ".webm")):
-            media = {"kind": "rawvideo", "url": prox(url)}
+        # external target: the [link] anchor; equals the permalink for self posts
+        url = permalink_abs
+        lm = _LINK_ANCHOR.search(content)
+        if lm:
+            url = html.unescape(lm.group(1))
+        is_self = url.rstrip("/") == permalink_abs.rstrip("/")
 
-        # preview/thumbnail
-        thumb = None
-        prev = (d.get("preview") or {}).get("images") or []
-        if prev:
-            res = prev[0].get("resolutions") or []
-            src = res[min(2, len(res) - 1)] if res else prev[0].get("source")
-            if src and src.get("url"):
-                thumb = prox(src["url"])
-        elif d.get("thumbnail", "").startswith("http"):
-            thumb = prox(d["thumbnail"])
+        thumb_el = entry.find("media:thumbnail", NS)
+        thumb = _prox(thumb_el.get("url")) if thumb_el is not None else None
+
+        media: dict = {"kind": "self"} if is_self else {"kind": "link"}
+        bare = url.split("?")[0].lower()
+        if not is_self:
+            if "v.redd.it/" in url:
+                vid = url.split("v.redd.it/")[1].split("/")[0].split("?")[0]
+                media = {
+                    "kind": "video",
+                    "video_id": vid,
+                    "dash": f"/api/vreddit/{vid}/DASHPlaylist.mpd" if vid.isalnum() else None,
+                    "fallback": None,
+                    "is_gif": False,
+                }
+            elif bare.endswith(IMAGE_EXT):
+                media = {"kind": "image", "url": _prox(url)}
+            elif bare.endswith(VIDEO_EXT):
+                media = {"kind": "rawvideo", "url": _prox(url)}
+
+        domain = ""
+        if not is_self and "://" in url:
+            domain = url.split("://", 1)[1].split("/", 1)[0].removeprefix("www.")
 
         return {
-            "id": d.get("id"),
-            "subreddit": d.get("subreddit"),
-            "title": d.get("title"),
-            "author": d.get("author"),
-            "score": d.get("score"),
-            "num_comments": d.get("num_comments"),
-            "created_utc": d.get("created_utc"),
-            "over_18": bool(d.get("over_18")),
-            "spoiler": bool(d.get("spoiler")),
-            "stickied": bool(d.get("stickied")),
-            "selftext": d.get("selftext") or "",
-            "url": url,
-            "permalink": d.get("permalink"),
-            "link_flair_text": d.get("link_flair_text"),
-            "domain": d.get("domain"),
+            "id": pid,
+            "subreddit": subreddit,
+            "title": html.unescape(self._entry_text(entry, "title")),
+            "author": author,
+            "score": None,             # not exposed via RSS
+            "num_comments": None,      # not exposed via RSS
+            "created_utc": created,
+            "over_18": False,          # filled from directory lookup by caller
+            "spoiler": False,
+            "stickied": False,
+            "selftext": "",
+            "selftext_html": selftext_html,
+            "url": None if is_self else url,
+            "permalink": permalink,
+            "link_flair_text": None,
+            "domain": domain or None,
             "thumb": thumb,
             "media": media,
         }
 
+    def _harvest_feed_about(self, root: ET.Element):
+        """Listing feeds carry the sub's title/description/logo — keep them for about()."""
+        cat = root.find("atom:category", NS)
+        name = cat.get("term") if cat is not None else None
+        if not name:
+            return
+        logo = root.find("atom:logo", NS)
+        self._about_cache[name.lower()] = {
+            "name": name,
+            "title": (root.findtext("atom:title", "", NS) or name),
+            "description": root.findtext("atom:subtitle", "", NS) or "",
+            "icon": (logo.text or "") if logo is not None else "",
+        }
+
+    def _fill_nsfw_and_index(self, posts: list[dict]):
+        """Set over_18 from the local directory (subreddit-level) and organically index names."""
+        names = sorted({p["subreddit"] for p in posts if p["subreddit"]})
+        known = db.over18_lookup(names)
+        for p in posts:
+            sub = (p["subreddit"] or "").lower()
+            p["over_18"] = bool(known.get(sub))
+        try:
+            db.upsert_subreddits([{"name": n} for n in names], source="organic")
+        except Exception:
+            pass  # indexing must never break a read
+
     @staticmethod
     def _apply_nsfw(posts: list[dict], nsfw: str) -> list[dict]:
+        # Subreddit-level only: RSS has no per-post flag. Unknown subs count as SFW.
         if nsfw == "sfw":
             return [p for p in posts if not p["over_18"]]
         if nsfw == "nsfw":
             return [p for p in posts if p["over_18"]]
         return posts
 
-    def _organic_index(self, children: list[dict]):
-        rows = [
-            {"name": c["data"].get("subreddit"), "over18": c["data"].get("over_18")}
-            for c in children
-            if c.get("kind") == "t3" and c.get("data", {}).get("subreddit")
-        ]
-        try:
-            db.upsert_subreddits(rows, source="organic")
-        except Exception:
-            pass  # indexing must never break a read
+    def _posts_page(self, root: ET.Element, nsfw: str, limit: int) -> dict:
+        entries = root.findall("atom:entry", NS)
+        # search feeds prepend community (t5_) matches — posts are t3_ only
+        t3 = [e for e in entries if (e.findtext("atom:id", "", NS)).startswith("t3_")]
+        posts = [self._parse_post(e) for e in t3]
+        posts = [p for p in posts if p["id"]]
+        self._fill_nsfw_and_index(posts)
+        # 'after' continues from the last post entry regardless of nsfw filtering
+        after = None
+        if t3 and len(entries) >= limit:
+            after = t3[-1].findtext("atom:id", "", NS) or None
+        return {"posts": self._apply_nsfw(posts, nsfw), "after": after}
 
     # ---------- endpoints ----------
 
     async def listing(self, subreddit: str | None, sort: str, t: str, after: str | None,
                       limit: int, nsfw: str) -> dict:
-        base = f"/r/{subreddit}" if subreddit else ""
-        params = {"limit": limit, "t": t}
+        sort = "hot" if sort == "best" else sort  # 'best' needs a logged-in session
+        base = f"/r/{subreddit}" if subreddit else "/r/all"
+        params = {"limit": limit}
+        if sort == "top":
+            params["t"] = t
         if after:
             params["after"] = after
-        data = await self.get(f"{base}/{sort}", params)
-        children = data.get("data", {}).get("children", [])
-        self._organic_index(children)
-        posts = [self.normalize_post(c["data"]) for c in children if c.get("kind") == "t3"]
-        return {"posts": self._apply_nsfw(posts, nsfw), "after": data.get("data", {}).get("after")}
+        root = await self._fetch(f"{base}/{sort}.rss", params)
+        self._harvest_feed_about(root)
+        return self._posts_page(root, nsfw, limit)
 
     async def subreddit_about(self, name: str) -> dict:
-        data = await self.get(f"/r/{name}/about")
-        d = data.get("data", {})
+        key = name.lower()
+        if key not in self._about_cache:
+            root = await self._fetch(f"/r/{name}/hot.rss", {"limit": 1})
+            self._harvest_feed_about(root)
+        about = self._about_cache.get(key) or {"name": name, "title": name, "description": "", "icon": ""}
+        stored = db.get_subreddit(name)
         row = {
-            "name": d.get("display_name"),
-            "title": d.get("title"),
-            "description": d.get("public_description"),
-            "subscribers": d.get("subscribers"),
-            "over18": d.get("over18"),
-            "icon": d.get("icon_img") or d.get("community_icon", "").split("?")[0],
-            "created_utc": d.get("created_utc"),
+            **about,
+            "subscribers": (stored or {}).get("subscribers") or None,
+            "over18": bool((stored or {}).get("over18")),
+            "created_utc": None,
         }
         db.upsert_subreddits([row], source="organic")
         return row
 
     async def comments(self, subreddit: str, post_id: str, sort: str, comment: str | None) -> dict:
-        params = {"limit": 500, "sort": sort}
-        if comment:
-            params["comment"] = comment
-            params["context"] = 3
-        data = await self.get(f"/r/{subreddit}/comments/{post_id}", params)
-        post = self.normalize_post(data[0]["data"]["children"][0]["data"])
+        # sort/comment ignored: one canonical URL per thread keeps the cache warm,
+        # and the feed serves its own fixed order anyway
+        root = await self._fetch(f"/r/{subreddit}/comments/{post_id}/.rss", {"limit": 500})
+        entries = root.findall("atom:entry", NS)
+        if not entries:
+            raise RedditError("Thread feed came back empty")
 
-        def walk(node) -> list[dict]:
-            out = []
-            for c in node.get("data", {}).get("children", []):
-                kind, d = c.get("kind"), c.get("data", {})
-                if kind == "t1":
-                    out.append({
-                        "id": d.get("id"),
-                        "author": d.get("author"),
-                        "body": d.get("body") or "",
-                        "score": d.get("score"),
-                        "created_utc": d.get("created_utc"),
-                        "stickied": bool(d.get("stickied")),
-                        "is_submitter": bool(d.get("is_submitter")),
-                        "distinguished": d.get("distinguished"),
-                        "replies": walk(d["replies"]) if isinstance(d.get("replies"), dict) else [],
-                    })
-                elif kind == "more":
-                    out.append({
-                        "id": d.get("id"), "more": True,
-                        "count": d.get("count", 0),
-                        "parent_id": d.get("parent_id", ""),
-                        "children": d.get("children", []),
-                    })
-            return out
+        post = self._parse_post(entries[0])
+        post["subreddit"] = post["subreddit"] or subreddit
+        self._fill_nsfw_and_index([post])
 
-        return {"post": post, "comments": walk(data[1])}
+        out = []
+        for e in entries[1:]:
+            raw_id = e.findtext("atom:id", "", NS)          # t1_xxx
+            author_el = e.find("atom:author/atom:name", NS)
+            author = (author_el.text or "").removeprefix("/u/") if author_el is not None else "[deleted]"
+            content = e.findtext("atom:content", "", NS) or ""
+            m = _MD_BLOCK.search(content)
+            body_html = m.group(1).strip() if m else content
+            out.append({
+                "id": raw_id.split("_", 1)[-1],
+                "author": author,
+                "body": "",
+                "body_html": body_html,
+                "score": None,
+                "created_utc": _epoch(e.findtext("atom:updated", "", NS)),
+                "stickied": False,
+                "is_submitter": bool(post["author"]) and author == post["author"],
+                "distinguished": None,
+                "replies": [],   # RSS is flat: no parent/child structure
+            })
+        return {"post": post, "comments": out}
 
     async def search(self, q: str, subreddit: str | None, sort: str, t: str,
                      after: str | None, nsfw: str, limit: int) -> dict:
-        base = f"/r/{subreddit}/search" if subreddit else "/search"
+        base = f"/r/{subreddit}/search.rss" if subreddit else "/search.rss"
         params = {"q": q, "sort": sort, "t": t, "limit": limit, "type": "link"}
         if subreddit:
-            params["restrict_sr"] = "true"
+            params["restrict_sr"] = "on"
         if nsfw in ("nsfw", "all"):
             params["include_over_18"] = "on"
         if after:
             params["after"] = after
-        data = await self.get(base, params)
-        children = data.get("data", {}).get("children", [])
-        self._organic_index(children)
-        posts = [self.normalize_post(c["data"]) for c in children if c.get("kind") == "t3"]
-        return {"posts": self._apply_nsfw(posts, nsfw), "after": data.get("data", {}).get("after")}
+        root = await self._fetch(base, params)
+        return self._posts_page(root, nsfw, limit)
+
+    def _parse_subreddit_entry(self, entry: ET.Element) -> dict | None:
+        link = entry.find("atom:link", NS)
+        href = link.get("href") if link is not None else ""
+        m = re.search(r"/r/([^/]+)/?", href or "")
+        if not m:
+            return None
+        content = entry.findtext("atom:content", "", NS) or ""
+        icon = ""
+        im = re.search(r'<img src="([^"]+)"', content)
+        if im:
+            icon = html.unescape(im.group(1))
+        description = _strip_tags(content).replace("[link]", "").strip()
+        return {
+            "name": m.group(1),
+            "title": html.unescape(entry.findtext("atom:title", "", NS) or ""),
+            "description": description[:500],
+            "subscribers": 0,                                   # not exposed via RSS
+            "over18": False,
+            "icon": icon,
+            "created_utc": _epoch(entry.findtext("atom:updated", "", NS)) or 0,
+        }
+
+    async def _subreddits_feed(self, path: str, params: dict) -> dict:
+        root = await self._fetch(path, params)
+        entries = root.findall("atom:entry", NS)
+        rows = [r for r in (self._parse_subreddit_entry(e) for e in entries) if r]
+        # enrich over18 from what the directory already knows
+        known = db.over18_lookup([r["name"] for r in rows])
+        for r in rows:
+            r["over18"] = bool(known.get(r["name"].lower()))
+        after = None
+        if entries and len(entries) >= int(params.get("limit") or 25):
+            after = entries[-1].findtext("atom:id", "", NS) or None
+        return {"rows": rows, "after": after}
 
     async def search_subreddits(self, q: str, after: str | None, limit: int,
                                 include_nsfw: bool = True) -> dict:
@@ -266,43 +359,16 @@ class RedditClient:
             params["include_over_18"] = "on"
         if after:
             params["after"] = after
-        data = await self.get("/subreddits/search", params)
-        subs, rows = [], []
-        for c in data.get("data", {}).get("children", []):
-            d = c.get("data", {})
-            row = {
-                "name": d.get("display_name"),
-                "title": d.get("title"),
-                "description": d.get("public_description"),
-                "subscribers": d.get("subscribers"),
-                "over18": d.get("over18"),
-                "icon": d.get("icon_img") or (d.get("community_icon") or "").split("?")[0],
-                "created_utc": d.get("created_utc"),
-            }
-            rows.append(row)
-            subs.append(row)
-        db.upsert_subreddits(rows, source="organic")
-        return {"subreddits": subs, "after": data.get("data", {}).get("after")}
+        data = await self._subreddits_feed("/subreddits/search.rss", params)
+        db.upsert_subreddits(data["rows"], source="organic")
+        return {"subreddits": data["rows"], "after": data["after"]}
 
     async def subreddit_listing(self, which: str, after: str | None, limit: int) -> dict:
-        """which: popular | new | default"""
+        """which: popular | new"""
         params = {"limit": limit}
         if after:
             params["after"] = after
-        data = await self.get(f"/subreddits/{which}", params)
-        rows = []
-        for c in data.get("data", {}).get("children", []):
-            d = c.get("data", {})
-            rows.append({
-                "name": d.get("display_name"),
-                "title": d.get("title"),
-                "description": d.get("public_description"),
-                "subscribers": d.get("subscribers"),
-                "over18": d.get("over18"),
-                "icon": d.get("icon_img") or (d.get("community_icon") or "").split("?")[0],
-                "created_utc": d.get("created_utc"),
-            })
-        return {"rows": rows, "after": data.get("data", {}).get("after")}
+        return await self._subreddits_feed(f"/subreddits/{which}.rss", params)
 
 
 client = RedditClient()

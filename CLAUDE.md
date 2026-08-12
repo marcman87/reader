@@ -8,8 +8,11 @@ internal hostnames, tokens, or other services' information in it.
 ## Stack conventions
 - FastAPI + SQLAlchemy + SQLite + React (Vite) + Docker Compose (matches Marcus's
   other services).
-- Secrets live in `.env` (Reddit API credentials) — gitignored, never commit. The
-  tracked template is `.env.example`. The SQLite DB (`data/reader.db`) is gitignored.
+- Reddit content comes from the public RSS/Atom feeds — **no API credentials**
+  (Reddit declined the Data API application, July 2026). Respect the throttle/cache
+  logic in `backend/app/reddit.py`; unauthenticated feeds 429 aggressively.
+- `.env` is optional (UA/DB-path overrides only) — still gitignored, never commit.
+  The tracked template is `.env.example`. The SQLite DB (`data/reader.db`) is gitignored.
 
 ## Develop & deploy
 - Develop here on the laptop with Claude Code; commit and `git push`

@@ -1,11 +1,16 @@
 """Subreddit directory population.
 
-Layers:
-  seed   - paginate /subreddits/{popular,new,default} (~3K subs, ~1 min)
-  prefix - sweep /subreddits/search across a-z0-9 single chars (~30-60K, ~30-40 min at 100 QPM)
-  deep   - two-character pairs on top of prefix (1,296 queries; several hours)
+Layers (all remote layers ride the RSS client's global ~6 req/min throttle,
+so they are much slower than they were under the authenticated API — the
+Arctic Shift import is the recommended way to get broad coverage):
+  seed   - paginate /subreddits/{popular,new}.rss (~2K subs, ~10 min)
+  prefix - sweep /subreddits/search.rss across a-z0-9 single chars (hours)
+  deep   - two-character pairs on top of prefix (1,296 queries; days — avoid)
   import - Arctic Shift bulk dump via scripts/import_arctic_shift.py (millions)
   organic- every listing/search response upserts what it saw (automatic)
+
+RSS subreddit entries carry no subscriber counts or NSFW flags; those fields
+stay 0/unknown until enriched by an import.
 """
 import asyncio
 import itertools
@@ -27,8 +32,9 @@ _state = {
 }
 _task: asyncio.Task | None = None
 
-# Stay comfortably under the 100 QPM script-app budget so browsing still works.
-CRAWL_DELAY = 1.0  # seconds between crawl requests (~60 QPM for the crawler)
+# The RSS client already throttles globally; this extra gap leaves slots free
+# so interactive browsing isn't starved while a crawl runs.
+CRAWL_DELAY = 5.0
 
 CHARS = string.ascii_lowercase + string.digits
 
@@ -73,8 +79,8 @@ async def _run(mode: str):
                   queries_done=0, upserted=0, error=None)
     try:
         if mode in ("seed", "full"):
-            _state["queries_total"] = 30  # ~10 pages per listing
-            for which in ("popular", "new", "default"):
+            _state["queries_total"] = 20  # ~10 pages per listing
+            for which in ("popular", "new"):
                 await _paginate_subreddit_listing(which)
         if mode in ("prefix", "full"):
             queries = list(CHARS)

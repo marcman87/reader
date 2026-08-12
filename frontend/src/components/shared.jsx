@@ -20,6 +20,12 @@ export function Markdown({ text }) {
   return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />
 }
 
+// Reddit-rendered HTML bodies (RSS feeds ship HTML, not markdown source)
+export function RedditHtml({ html }) {
+  if (!html) return null
+  return <div className="md" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html) }} />
+}
+
 export function ChanHtml({ html }) {
   if (!html) return null
   const clean = DOMPurify.sanitize(html, { ADD_ATTR: ['class'] })
@@ -102,14 +108,16 @@ export function PostCard({ post, expandMedia = false }) {
           </div>
           <h3 className="post-title"><Link to={to}>{post.title}</Link></h3>
           <div className="meta">
-            ▲ {fmt(post.score)}<span className="sep">·</span>
-            <Link to={to}>{fmt(post.num_comments)} comments</Link>
+            {post.score != null && <>▲ {fmt(post.score)}<span className="sep">·</span></>}
+            <Link to={to}>{post.num_comments != null ? `${fmt(post.num_comments)} comments` : 'comments'}</Link>
             {post.media.kind === 'link' && post.url && (
               <><span className="sep">·</span>
                 <a href={post.url} target="_blank" rel="noopener noreferrer">{post.domain}</a></>
             )}
           </div>
-          {expandMedia && post.selftext && <Markdown text={post.selftext} />}
+          {expandMedia && (post.selftext_html
+            ? <RedditHtml html={post.selftext_html} />
+            : post.selftext && <Markdown text={post.selftext} />)}
         </div>
         {!expandMedia && post.thumb && <img className="thumb" src={post.thumb} alt="" loading="lazy" />}
       </div>
@@ -134,10 +142,10 @@ export function Comment({ c }) {
         <span className={c.is_submitter ? 'op-badge' : c.distinguished ? 'mod-badge' : ''}>
           u/{c.author}
         </span>
-        <span className="sep">·</span>▲ {fmt(c.score)}
+        {c.score != null && <><span className="sep">·</span>▲ {fmt(c.score)}</>}
         <span className="sep">·</span>{ago(c.created_utc)}
       </div>
-      {!collapsed && <Markdown text={c.body} />}
+      {!collapsed && (c.body_html ? <RedditHtml html={c.body_html} /> : <Markdown text={c.body} />)}
       {!collapsed && c.replies?.map((r) => <Comment key={r.id} c={r} />)}
     </div>
   )

@@ -4,7 +4,9 @@ services:
     container_name: reader
     ports:
       - "8320:8320"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false   # no secrets needed since the RSS switch
     volumes:
       - ./data:/data
     restart: unless-stopped

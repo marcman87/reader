@@ -1,12 +1,9 @@
 import os
 
-REDDIT_CLIENT_ID = os.environ.get("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET", "")
-REDDIT_USERNAME = os.environ.get("REDDIT_USERNAME", "")
-REDDIT_PASSWORD = os.environ.get("REDDIT_PASSWORD", "")
+# No Reddit credentials: content comes from public Atom feeds (see reddit.py).
 USER_AGENT = os.environ.get(
-    "REDDIT_USER_AGENT",
-    f"windows:reader.selfhosted:v1.0 (by /u/{REDDIT_USERNAME or 'unknown'})",
+    "READER_USER_AGENT",
+    "reader-selfhosted/2.0 (personal read-only RSS reader)",
 )
 
 DB_PATH = os.environ.get("DB_PATH", "/data/reader.db")

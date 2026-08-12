@@ -37,7 +37,8 @@ export default function Listing() {
   return (
     <main className="page">
       <div className="meta" style={{ marginBottom: 4 }}>
-        r/{sub}{about && <> <span className="sep">·</span>{fmt(about.subscribers)} subscribers
+        r/{sub}{about && <>
+          {about.subscribers != null && <> <span className="sep">·</span>{fmt(about.subscribers)} subscribers</>}
           {about.over18 ? <span className="tag nsfw">NSFW</span> : null}</>}
       </div>
       {about?.description && <p style={{ color: 'var(--muted)', margin: '2px 0 0', fontSize: 13.5 }}>{about.description}</p>}

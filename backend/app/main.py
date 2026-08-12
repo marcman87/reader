@@ -25,7 +25,7 @@ async def reddit_error_handler(_, exc: RedditError):
 async def health():
     return {
         "ok": True,
-        "reddit_configured": reddit.configured,
+        "reddit_mode": "rss",  # credential-free public feeds
         "directory": db.directory_stats(),
     }
 

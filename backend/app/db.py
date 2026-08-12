@@ -76,6 +76,25 @@ def upsert_subreddits(rows: list[dict], source: str):
     conn.commit()
 
 
+def get_subreddit(name: str) -> dict | None:
+    row = get_conn().execute(
+        "SELECT name, title, description, subscribers, over18, icon, created_utc "
+        "FROM subreddits WHERE name = ?", (name,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def over18_lookup(names: list[str]) -> dict[str, bool]:
+    """Lowercased name -> over18 for subs the directory knows; missing = unknown."""
+    if not names:
+        return {}
+    qs = ",".join("?" * len(names))
+    rows = get_conn().execute(
+        f"SELECT name, over18 FROM subreddits WHERE name IN ({qs})", list(names)
+    ).fetchall()
+    return {r["name"].lower(): bool(r["over18"]) for r in rows}
+
+
 def search_directory(q: str, nsfw: str, limit: int, offset: int) -> tuple[list[dict], int]:
     conn = get_conn()
     where = []

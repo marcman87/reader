@@ -110,9 +110,9 @@ export default function Directory() {
             </div>
           )}
           <div className="controls">
-            <button className="btn" disabled={status?.running} onClick={() => crawl('seed')}>Seed (~3k, 1 min)</button>
-            <button className="btn" disabled={status?.running} onClick={() => crawl('prefix')}>Prefix crawl (~30–60k, ~40 min)</button>
-            <button className="btn" disabled={status?.running} onClick={() => crawl('deep')}>Deep crawl (hours)</button>
+            <button className="btn" disabled={status?.running} onClick={() => crawl('seed')}>Seed (~2k, ~10 min)</button>
+            <button className="btn" disabled={status?.running} onClick={() => crawl('prefix')}>Prefix crawl (hours)</button>
+            <span className="meta">crawls are slow over RSS — Arctic Shift import covers far more (see README)</span>
           </div>
 
           {live && (
