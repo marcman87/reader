@@ -83,9 +83,12 @@ Existing rows are enriched, never blanked. Millions of rows import in a few minu
 ## Notes and limits
 
 - Read-only by design: no posting, voting, or account features.
-- Reddit rate budget: unauthenticated RSS is throttled per IP; the client spaces requests
-  ~15 s apart, caches feeds for 5 minutes, and cools down for a minute after any 429.
-  A 429 error in the UI just means "wait a minute and retry".
+- Reddit rate budget: unauthenticated RSS is throttled hard per IP — from a datacenter IP
+  it's roughly 2 requests/minute (measured; residential IPs get more). The client spaces
+  requests 30 s apart, serves stale cache instantly while refreshing in the background,
+  answers subreddit "about" from the local directory without any fetch, and fails fast
+  with a clear message when the queue is full or a 429 cooldown is active. First visits
+  to uncached feeds are slow by nature; revisits are instant.
 - Comment threads are flat (RSS has no reply nesting) and capped at what the feed returns.
 - 4chan API is throttled to 1 request/second per their rules; large catalogs load in one call.
 - The media proxy only fetches from an allowlist (i.redd.it, v.redd.it, preview.redd.it,

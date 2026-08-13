@@ -25,9 +25,10 @@ from . import config, db
 BASE = "https://www.reddit.com"
 NS = {"atom": "http://www.w3.org/2005/Atom", "media": "http://search.yahoo.com/mrss/"}
 
-THROTTLE = 15.0     # seconds between upstream requests (global)
-CACHE_TTL = 300.0   # seconds a fetched feed stays fresh
+THROTTLE = 30.0     # seconds between upstream requests (global; AWS IPs get ~2 req/min)
+CACHE_TTL = 300.0   # seconds a fetched feed stays fresh (stale copies serve instantly + refresh)
 COOLDOWN = 60.0     # seconds to back off after a 429
+MAX_QUEUE_WAIT = 60.0  # fail fast instead of queuing past proxy timeouts
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 VIDEO_EXT = (".mp4", ".webm")
@@ -66,6 +67,8 @@ class RedditClient:
         self._last_req = 0.0
         self._cooldown_until = 0.0
         self._cache: dict[str, tuple[float, ET.Element]] = {}
+        self._refreshing: set[str] = set()
+        self._waiters = 0
         # feed-level subreddit metadata harvested from listing fetches
         self._about_cache: dict[str, dict] = {}
 
@@ -76,34 +79,56 @@ class RedditClient:
         cached = self._cache.get(url)
         if cached and time.monotonic() - cached[0] < CACHE_TTL:
             return cached[1]
+        if cached:
+            # stale-while-revalidate: answer now, refresh in the background —
+            # but only when nothing else is waiting for the rate budget
+            if (url not in self._refreshing and self._waiters == 0
+                    and time.monotonic() >= self._cooldown_until):
+                self._refreshing.add(url)
+                asyncio.create_task(self._background_refresh(url))
+            return cached[1]
 
         if time.monotonic() < self._cooldown_until:
-            if cached:  # stale beats nothing while rate-limited
-                return cached[1]
             raise RedditError(
                 "Backing off after a Reddit rate limit (429) — retry in a minute."
             )
+        return await self._fetch_fresh(url)
 
-        async with self._lock:
-            wait = THROTTLE - (time.monotonic() - self._last_req)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last_req = time.monotonic()
+    async def _background_refresh(self, url: str):
+        try:
+            await self._fetch_fresh(url)
+        except Exception:
+            pass  # stale copy stays; next visitor triggers another attempt
+        finally:
+            self._refreshing.discard(url)
+
+    async def _fetch_fresh(self, url: str) -> ET.Element:
+        if self._waiters * THROTTLE > MAX_QUEUE_WAIT:
+            raise RedditError(
+                "Feed queue is full (Reddit allows this server ~2 requests/min) — retry shortly."
+            )
+        self._waiters += 1
+        try:
+            async with self._lock:
+                wait = THROTTLE - (time.monotonic() - self._last_req)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._last_req = time.monotonic()
+        finally:
+            self._waiters -= 1
 
         resp = await self._http.get(url, headers={"User-Agent": config.USER_AGENT})
         if resp.status_code == 429:
             self._cooldown_until = time.monotonic() + COOLDOWN
-            if cached:
-                return cached[1]
             raise RedditError(
                 "Reddit rate limit hit (429). RSS feeds are throttled per IP — wait a minute and retry."
             )
         if resp.status_code >= 400:
-            raise RedditError(f"Reddit {resp.status_code} on {path}")
+            raise RedditError(f"Reddit {resp.status_code} on {url.removeprefix(BASE)}")
         try:
             root = ET.fromstring(resp.text)
         except ET.ParseError as e:
-            raise RedditError(f"Bad feed XML from {path}: {e}") from e
+            raise RedditError(f"Bad feed XML from {url.removeprefix(BASE)}: {e}") from e
 
         # cap cache size; oldest entries are cheapest to lose
         if len(self._cache) > 200:
@@ -255,20 +280,28 @@ class RedditClient:
         return self._posts_page(root, nsfw, limit)
 
     async def subreddit_about(self, name: str) -> dict:
+        """Directory DB + feed-harvested cache first — an upstream fetch only for
+        subs the directory has never heard of (rate budget is precious)."""
         key = name.lower()
-        if key not in self._about_cache:
+        about = self._about_cache.get(key)
+        stored = db.get_subreddit(name)
+        if not about and not stored:
             root = await self._fetch(f"/r/{name}/hot.rss", {"limit": 1})
             self._harvest_feed_about(root)
-        about = self._about_cache.get(key) or {"name": name, "title": name, "description": "", "icon": ""}
-        stored = db.get_subreddit(name)
-        row = {
-            **about,
-            "subscribers": (stored or {}).get("subscribers") or None,
-            "over18": bool((stored or {}).get("over18")),
-            "created_utc": None,
+            about = self._about_cache.get(key)
+            if about:
+                db.upsert_subreddits([about], source="organic")
+        about = about or {}
+        stored = stored or {}
+        return {
+            "name": about.get("name") or stored.get("name") or name,
+            "title": about.get("title") or stored.get("title") or name,
+            "description": about.get("description") or stored.get("description") or "",
+            "icon": about.get("icon") or stored.get("icon") or "",
+            "subscribers": stored.get("subscribers") or None,
+            "over18": bool(stored.get("over18")),
+            "created_utc": stored.get("created_utc") or None,
         }
-        db.upsert_subreddits([row], source="organic")
-        return row
 
     async def comments(self, subreddit: str, post_id: str, sort: str, comment: str | None) -> dict:
         # sort/comment ignored: one canonical URL per thread keeps the cache warm,

@@ -4,9 +4,10 @@ export async function api(path, params = {}) {
   ).toString()
   const res = await fetch(`/api${path}${qs ? `?${qs}` : ''}`)
   if (!res.ok) {
-    let detail = `${res.status}`
-    try { detail = (await res.json()).detail || detail } catch { /* noop */ }
-    throw new Error(detail)
+    let detail = ''
+    try { detail = (await res.json()).detail || '' } catch { /* noop */ }
+    // bare gateway errors (Cloudflare/proxy HTML) have no JSON detail
+    throw new Error(detail || `${res.status} — upstream is slow or rate-limited; wait a moment and retry`)
   }
   return res.json()
 }
